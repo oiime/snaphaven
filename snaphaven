@@ -1,0 +1,223 @@
+#!/usr/bin/env python
+
+import shutil
+import pyinotify
+import os
+import argparse
+import logging
+import filecmp
+from Queue import Queue
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
+
+
+class ProcessEvent(pyinotify.ProcessEvent):
+    def my_init(self, snaphaven):
+        self.snaphaven = snaphaven
+        self.queue = snaphaven.queue
+
+    def process_IN_DELETE(self, event):
+        self.snaphaven.del_target(event.pathname)
+
+    def process_IN_MOVED_FROM(self, event):
+        self.snaphaven.put_target(event.pathname)
+
+    def process_IN_CLOSE_WRITE(self, event):
+        self.snaphaven.put_target(event.pathname)
+
+    def process_IN_CREATE(self, event):
+        self.snaphaven.put_target(event.pathname)
+
+
+class SnapHaven(object):
+    COPY = 1
+    DELETE = 2
+
+    FILE_MODE_IRRELEVANT = 1
+    FILE_MODE_IN_KEYSPACE = 2
+    FILE_MODE_IN_SNAPSHOT = 3
+
+    """Main watcher class
+    """
+    def __init__(self, snapshot_dir, cassandra_dir, keyspaces, move_snapshots=False, sync_sstables=False, fullsync=False):
+        if snapshot_dir.endswith('/'):
+            snapshot_dir = snapshot_dir[:-1]
+        if cassandra_dir.endswith('/'):
+            cassandra_dir = cassandra_dir[:-1]
+
+        self.snapshot_dir = snapshot_dir
+        if len(self.snapshot_dir) <= 1:
+            raise argparse.ArgumentTypeError('Dont use root as a snapshot dir')
+        if not os.path.exists(self.snapshot_dir):
+            os.makedirs(self.snapshot_dir)
+
+        if not os.path.exists(cassandra_dir):
+            raise argparse.ArgumentTypeError('Cassandra directory does not exist: %s' % cassandra_dir)
+        self.cassandra_dir = cassandra_dir
+
+        for keyspace in keyspaces:
+            if not os.path.exists('%s/data/%s' % (cassandra_dir, keyspace)):
+                raise argparse.ArgumentTypeError('keyspace directory does not exist: %s/data/%s' % (cassandra_dir, keyspace))
+
+        self.keyspaces = keyspaces
+        self.move_snapshots = move_snapshots
+        self.sync_sstables = sync_sstables
+        self.fullsync = fullsync
+
+    def run(self):
+        self.queue = Queue()
+        self.process_event = ProcessEvent(snaphaven=self)
+        if self.fullsync is True:
+            self.__full_sync()
+
+        mask = pyinotify.IN_CLOSE_WRITE | pyinotify.IN_CREATE | pyinotify.IN_DELETE | pyinotify.IN_MODIFY | pyinotify.IN_MOVED_FROM
+        wm = pyinotify.WatchManager()
+        notifier = pyinotify.Notifier(wm, self.process_event)
+        for keyspace in self.keyspaces:
+            keyspace_dir = '%s/data/%s' % (self.cassandra_dir, keyspace)
+            udirs = wm.add_watch(keyspace_dir, mask, rec=True, auto_add=True)
+            if udirs[keyspace_dir] == -1:
+                raise argparse.ArgumentTypeError('add_watch failed: %s' % keyspace_dir)
+
+        logger.info('Running notifier loop')
+        notifier.loop()
+
+    def __full_sync(self):
+        logger.info('Init sync %s with %r', self.cassandra_dir, self.keyspaces)
+        for root, dirs, files in os.walk(self.snapshot_dir):
+            for filename in files:
+                if not root.endswith('/'):
+                    root += '/'
+                fullpath = os.path.abspath(root + filename)
+                cassandra_fullpath = self.cassandra_dir + '/' + fullpath[len(self.snapshot_dir)+1:]
+
+                if not os.path.exists(cassandra_fullpath):
+                    self.del_target(cassandra_fullpath)
+
+            if len(files) == 0 and len(dirs) == 0:
+                cassandra_fullpath = self.cassandra_dir + '/' + os.path.abspath(root)[len(self.snapshot_dir)+1:]
+                self.del_target(cassandra_fullpath)
+
+        for root, dirs, files in os.walk(self.cassandra_dir):
+            for filename in files:
+                if not root.endswith('/'):
+                    root += '/'
+                fullpath = os.path.abspath(root + filename)
+                target_fullpath = self.__get_target_filename(fullpath)
+                if not os.path.exists(target_fullpath):
+                    self.put_target(fullpath)
+                elif not filecmp.cmp(fullpath, target_fullpath):
+                    self.put_target(fullpath)
+
+    def put_target(self, fullpath):
+        # ignore temporary
+        if '-tmp-' in fullpath:
+            return
+
+        file_mode = self.__get_file_mode(fullpath)
+        target_filename = self.__get_target_filename(fullpath)
+
+        if file_mode == self.FILE_MODE_IN_SNAPSHOT:
+            if self.move_snapshots is True:
+                self.__move(fullpath, target_filename)
+            else:
+                self.__copy(fullpath, target_filename)
+        elif self.sync_sstables is True and file_mode == self.FILE_MODE_IN_KEYSPACE:
+            self.__copy(fullpath, target_filename)
+
+    def del_target(self, fullpath):
+        target_filename = self.__get_target_filename(fullpath)
+        file_mode = self.__get_file_mode(fullpath)
+        if file_mode == self.FILE_MODE_IN_SNAPSHOT and self.move_snapshots is True:
+            if os.path.isfile(target_filename):
+                # we only remove a snapshot directory if the directory itself is gone
+                return
+            elif os.path.isdir(target_filename) and os.listdir(target_filename) == []:
+                self.__delete(target_filename)
+        else:
+            self.__delete(target_filename)
+
+    def __delete(self, fullpath):
+        logger.info('Deleting: %s', fullpath)
+        if os.path.isfile(fullpath):
+            os.remove(fullpath)
+        elif os.path.isdir(fullpath):
+            shutil.rmtree(fullpath)
+
+    def __move(self, source, target):
+        self.__copy(source, target, move=True)
+
+    def __copy(self, source, target, move=False):
+        if os.path.isfile(source):
+            target_dirname = os.path.dirname(target)
+            if not os.path.exists(target_dirname):
+                try:
+                    os.makedirs(target_dirname)
+                except OSError as e:
+                    if e.errno != 17:
+                        raise
+            if os.path.isfile(source):
+                try:
+                    if move is True:
+                        logger.info('Moving file: %s -> %s', source, target)
+                        shutil.move(source, target)
+                    else:
+                        logger.info('Copying file: %s -> %s', source, target)
+                        shutil.copy2(source, target)
+
+                except OSError as e:
+                    if e.errno != 2:
+                        raise
+                except IOError as e:
+                    if e.errno != 2:
+                        raise
+
+    def __get_target_filename(self, fullpath):
+        return self.snapshot_dir + '/' + fullpath[len(self.cassandra_dir)+1:]
+
+    def __get_file_mode(self, fullpath):
+        tree = fullpath[len(self.cassandra_dir)+1:].split('/')
+        if len(tree) < 1 or tree[0] != 'data':
+            return self.FILE_MODE_IRRELEVANT
+
+        if tree[1] not in self.keyspaces:
+            return self.FILE_MODE_IRRELEVANT
+
+        if len(tree) == 6 and tree[0] == 'data' and tree[3] == 'snapshots':
+            return self.FILE_MODE_IN_SNAPSHOT
+
+        return self.FILE_MODE_IN_KEYSPACE
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Manage locally synced snapshots.')
+    parser.add_argument("-q", "--quiet", action='store_true',
+                        help="Suppress Output", default=False)
+    parser.add_argument("-v", "--verbosity", type=int, choices=[0, 1, 2],
+                        help="Change output verbosity", default=1)
+    parser.add_argument("--move-snapshots", action='store_true', help='Move snapshots', default=False)
+    parser.add_argument("--sync-sstables", action='store_true', help="Sync the sstables themselves, not just the snapshots", default=False)
+    parser.add_argument('keyspaces', metavar='param', nargs='+', help='Keyspaces to backup')
+    parser.add_argument('-d', '--cassandra_dir', nargs='?', help='cassandra directory', default="/var/lib/cassandra")
+    parser.add_argument('-s', '--snapshot_dir', help='local snapshots directory', required=True)
+    parser.add_argument('--fullsync', action='store_true', help='Run full sync on existing files', default=False)
+
+    args = vars(parser.parse_args())
+
+    if args['verbosity'] == 0:
+        logger.setLevel(logging.WARNING)
+    elif args['verbosity'] == 1:
+        logger.setLevel(logging.INFO)
+    elif args['verbosity'] == 2:
+        logger.setLevel(logging.DEBUG)
+    if args['quiet'] == True:
+        logger.propagate = False
+
+    synchaven = SnapHaven(
+                args['snapshot_dir'],
+                args['cassandra_dir'],
+                args['keyspaces'],
+                args['move_snapshots'],
+                args['sync_sstables'],
+                args['fullsync'])
+    synchaven.run()
