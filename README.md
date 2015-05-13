@@ -18,29 +18,50 @@ Usage
 ------------
 Note: -d must point at the actual cassandra directory, not a symlink
 ```
-usage: snaphaven -s SNAPSHOT_DIR keyspace [keyspace ...]
-          -h --help              help
-          -v --verbosity LEVEL   0=WARNING, 1=INFO, 2=DEBUG
-          -q --quiet             suppress output
-          -d --cassandra_dir CASSANDRA_DIR       cassandra root directory
-          --move-snapshots       move the snapshots instead of copying
-          --sync-sstables        also copy the sstables, not just the snapshots
-          --fullsync             start by syncing the existing directory tree
+usage: snaphaven [-h] [-q] [-v {0,1,2}] [--move-snapshots] [--sync-sstables]
+                 [-d [CASSANDRA_DIR]] -s SNAPSHOT_DIR [--fullsync]
+                 [--snapshot_regex SNAPSHOT_REGEX]
+                 keyspace [keyspace ...]
+
+Manage locally synced snapshots.
+
+positional arguments:
+  keyspace              Keyspaces to backup
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -q, --quiet           Suppress Output
+  -v {0,1,2}, --verbosity {0,1,2}
+                        Change output verbosity
+  --move-snapshots      Move snapshots
+  --sync-sstables       Sync the sstables themselves, not just the snapshots
+  -d [CASSANDRA_DIR], --cassandra_dir [CASSANDRA_DIR]
+                        cassandra directory
+  -s SNAPSHOT_DIR, --snapshot_dir SNAPSHOT_DIR
+                        local snapshots directory
+  --fullsync            Run full sync on existing files
+  --snapshot_regex SNAPSHOT_REGEX
+                        Limit snapshot backup to those containing regex
+```
+
+##### Watch keyspace `keyspace` for new snapshots and copy them
+```
+snaphaven -s /mnt/nas_drive/cassandra_backup keyspace
+```
+
+##### Only copy certian certain snapshots
+```
+snaphaven -s /mnt/nas_drive/cassandra_backup --snapshot_regex '^opcenter_' keyspace
+```
+
+##### Move snapshots as they are being written
+```
+snaphaven -s /mnt/nas_drive/cassandra_backup --move-snapshots keyspace
 
 ```
-#### Watch keyspace `keyspace` for new snapshots and copy them
+##### Backup all sstables in additional to snapshots
 ```
-snaphaven -s /mnt/nas_drive/cassandra_backup -s /var/lib/cassandra keyspace
-```
-
-#### Move snapshots as they are being written
-```
-snaphaven -s /mnt/nas_drive/cassandra_backup --move-snapshots -s /var/lib/cassandra keyspace
-
-```
-#### Backup all sstables in additional to snapshots
-```
-snaphaven -s /mnt/nas_drive/cassandra_backup --sync-sstables --fullsync -s /var/lib/cassandra keyspace
+snaphaven -s /mnt/nas_drive/cassandra_backup --sync-sstables --fullsync keyspace
 ```
 #### upstart script
 ```

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-
+import re
 import shutil
 import pyinotify
 import os
@@ -29,16 +29,13 @@ class ProcessEvent(pyinotify.ProcessEvent):
 
 
 class SnapHaven(object):
-    COPY = 1
-    DELETE = 2
-
     FILE_MODE_IRRELEVANT = 1
     FILE_MODE_IN_KEYSPACE = 2
     FILE_MODE_IN_SNAPSHOT = 3
 
     """Main watcher class
     """
-    def __init__(self, snapshot_dir, cassandra_dir, keyspaces, move_snapshots=False, sync_sstables=False, fullsync=False):
+    def __init__(self, snapshot_dir, cassandra_dir, keyspaces, move_snapshots=False, sync_sstables=False, fullsync=False, snapshot_regex=None):
         if snapshot_dir.endswith('/'):
             snapshot_dir = snapshot_dir[:-1]
         if cassandra_dir.endswith('/'):
@@ -63,6 +60,15 @@ class SnapHaven(object):
         self.sync_sstables = sync_sstables
         self.fullsync = fullsync
 
+        if snapshot_regex is not None:
+            try:
+                # eg '^opcenter_'
+                self.snapshot_regex = re.compile(snapshot_regex)
+            except:
+                raise argparse.ArgumentTypeError('Could not parse snapshot regex: %s' % snapshot_regex)
+        else:
+            self.snapshot_regex = None
+
     def run(self):
         self.process_event = ProcessEvent(snaphaven=self)
         if self.fullsync is True:
@@ -73,6 +79,7 @@ class SnapHaven(object):
         notifier = pyinotify.Notifier(wm, self.process_event)
         for keyspace in self.keyspaces:
             keyspace_dir = '%s/data/%s' % (self.cassandra_dir, keyspace)
+            logger.info('Adding keyspace directory to watch list: %s', keyspace_dir)
             udirs = wm.add_watch(keyspace_dir, mask, rec=True, auto_add=True)
             if udirs[keyspace_dir] == -1:
                 raise argparse.ArgumentTypeError('add_watch failed: %s' % keyspace_dir)
@@ -136,7 +143,7 @@ class SnapHaven(object):
             self.__delete(target_filename)
 
     def __delete(self, fullpath):
-        logger.info('Deleting: %s', fullpath)
+        logger.debug('Deleting: %s', fullpath)
         if os.path.isfile(fullpath):
             os.remove(fullpath)
         elif os.path.isdir(fullpath):
@@ -152,22 +159,28 @@ class SnapHaven(object):
                 try:
                     os.makedirs(target_dirname)
                 except OSError as e:
-                    if e.errno != 17:
+                    if e.error == 17:
+                        logger.debug('Unable to create: %s %r', target_dirname, e)
+                    else:
                         raise
             if os.path.isfile(source):
                 try:
                     if move is True:
-                        logger.info('Moving file: %s -> %s', source, target)
+                        logger.debug('Moving file: %s -> %s', source, target)
                         shutil.move(source, target)
                     else:
-                        logger.info('Copying file: %s -> %s', source, target)
+                        logger.debug('Copying file: %s -> %s', source, target)
                         shutil.copy2(source, target)
 
                 except OSError as e:
-                    if e.errno != 2:
+                    if e.errno == 2:
+                        logger.debug('Unable to copy: %s %r', target_dirname, e)
+                    else:
                         raise
                 except IOError as e:
-                    if e.errno != 2:
+                    if e.errno == 2:
+                        logger.debug('Unable to copy: %s %r', target_dirname, e)
+                    else:
                         raise
 
     def __get_target_filename(self, fullpath):
@@ -182,7 +195,10 @@ class SnapHaven(object):
             return self.FILE_MODE_IRRELEVANT
 
         if len(tree) == 6 and tree[0] == 'data' and tree[3] == 'snapshots':
-            return self.FILE_MODE_IN_SNAPSHOT
+            if self.snapshot_regex is not None and not self.snapshot_regex.match(tree[4]):
+                return self.FILE_MODE_IRRELEVANT
+            else:
+                return self.FILE_MODE_IN_SNAPSHOT
 
         return self.FILE_MODE_IN_KEYSPACE
 
@@ -198,6 +214,7 @@ if __name__ == '__main__':
     parser.add_argument('-d', '--cassandra_dir', nargs='?', help='cassandra directory', default="/var/lib/cassandra")
     parser.add_argument('-s', '--snapshot_dir', help='local snapshots directory', required=True)
     parser.add_argument('--fullsync', action='store_true', help='Run full sync on existing files', default=False)
+    parser.add_argument('--snapshot_regex', help='Limit snapshot backup to those containing regex')
 
     args = vars(parser.parse_args())
 
@@ -210,11 +227,12 @@ if __name__ == '__main__':
     if args['quiet'] == True:
         logger.propagate = False
 
-    synchaven = SnapHaven(
+    snaphaven = SnapHaven(
                 args['snapshot_dir'],
                 args['cassandra_dir'],
                 args['keyspaces'],
                 args['move_snapshots'],
                 args['sync_sstables'],
-                args['fullsync'])
-    synchaven.run()
+                args['fullsync'],
+                args['snapshot_regex'])
+    snaphaven.run()
