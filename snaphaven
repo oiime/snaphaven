@@ -197,7 +197,7 @@ if __name__ == '__main__':
                         help="Change output verbosity", default=1)
     parser.add_argument("--move-snapshots", action='store_true', help='Move snapshots', default=False)
     parser.add_argument("--sync-sstables", action='store_true', help="Sync the sstables themselves, not just the snapshots", default=False)
-    parser.add_argument('keyspaces', metavar='param', nargs='+', help='Keyspaces to backup')
+    parser.add_argument('keyspaces', metavar='keyspace', nargs='+', help='Keyspaces to backup')
     parser.add_argument('-d', '--cassandra_dir', nargs='?', help='cassandra directory', default="/var/lib/cassandra")
     parser.add_argument('-s', '--snapshot_dir', help='local snapshots directory', required=True)
     parser.add_argument('--fullsync', action='store_true', help='Run full sync on existing files', default=False)
