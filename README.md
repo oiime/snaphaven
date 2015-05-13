@@ -19,13 +19,13 @@ Usage
 Note: -d must point at the actual cassandra directory, not a symlink
 ```
 usage: snaphaven -s SNAPSHOT_DIR keyspace [keyspace ...]
-          -h --help         help
-          -v --verbosity    0=WARNING, 1=INFO, 2=DEBUG
-          -q --quiet        suppress output
-          -d                cassandra root directory
-          --move-snapshots  move the snapshots instead of copying
-          --sync-sstables   also copy the sstables, not just the snapshots
-          --fullsync        start by syncing the existing directory tree
+          -h --help              help
+          -v --verbosity LEVEL   0=WARNING, 1=INFO, 2=DEBUG
+          -q --quiet             suppress output
+          -d --cassandra_dir CASSANDRA_DIR       cassandra root directory
+          --move-snapshots       move the snapshots instead of copying
+          --sync-sstables        also copy the sstables, not just the snapshots
+          --fullsync             start by syncing the existing directory tree
 
 ```
 #### Watch keyspace `keyspace` for new snapshots and copy them
